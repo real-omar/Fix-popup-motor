@@ -1,18 +1,16 @@
 package com.omar.camerahelper;
 
-import android.os.FileUtils;
 import android.os.SystemProperties;
 import android.util.Log;
 
-import java.io.File;
-import java.io.IOException;
-
 /**
- * Direct Java port of the smali CameraMotorController.
- * Pure sysfs/prop I/O — no Xposed-specific code. Must run with system/root
- * privileges (called from a system_server-side hook in MainHook), since
- * /sys/class/motor/* and /sys/class/leds/* are not writable by regular apps
- * on most OEM builds.
+ * All sysfs/persist reads and writes now go through RootShell (a persistent
+ * `su` session) instead of FileUtils, so this works regardless of whether
+ * system_server's own uid/sepolicy domain has write access to
+ * /sys/class/motor/* and /sys/class/leds/* — root does.
+ *
+ * SystemProperties reads/writes are left as regular Android API calls since
+ * those are already accessible without root.
  */
 public class CameraMotorController {
 
@@ -41,54 +39,37 @@ public class CameraMotorController {
     }
 
     public static void calibrate() {
-        String calibration;
-        try {
-            calibration = FileUtils.readTextFile(
-                    new File(CAMERA_PERSIST_HALL_CALIBRATION), 0, null);
-        } catch (IOException e) {
-            Log.e(TAG, "Failed to read " + CAMERA_PERSIST_HALL_CALIBRATION, e);
+        String calibration = RootShell.get().readFile(CAMERA_PERSIST_HALL_CALIBRATION);
+        if (calibration == null || calibration.isEmpty()) {
+            Log.e(TAG, "Failed to read " + CAMERA_PERSIST_HALL_CALIBRATION
+                    + ", falling back to default calibration");
             calibration = HALL_CALIBRATION_DEFAULT;
         }
-        try {
-            FileUtils.stringToFile(CAMERA_MOTOR_HALL_CALIBRATION, calibration);
-        } catch (IOException e) {
-            Log.e(TAG, "Failed to write to " + CAMERA_MOTOR_HALL_CALIBRATION, e);
+        if (!RootShell.get().writeFile(CAMERA_MOTOR_HALL_CALIBRATION, calibration)) {
+            Log.e(TAG, "Failed to write to " + CAMERA_MOTOR_HALL_CALIBRATION);
         }
     }
 
     public static String getMotorPosition() {
-        String position = null;
-        try {
-            position = FileUtils.readTextFile(
-                    new File(CAMERA_MOTOR_POSITION_PATH), 1, null);
-        } catch (IOException e) {
-            Log.e(TAG, "Failed to read " + CAMERA_MOTOR_POSITION_PATH, e);
+        String position = RootShell.get().readFile(CAMERA_MOTOR_POSITION_PATH);
+        if (position == null) {
+            Log.e(TAG, "Failed to read " + CAMERA_MOTOR_POSITION_PATH);
         }
         return position;
     }
 
     public static void setMotorDirection(String direction) {
-        try {
-            FileUtils.stringToFile(CAMERA_MOTOR_DIRECTION_PATH, direction);
-        } catch (IOException e) {
-            Log.e(TAG, "Failed to write to " + CAMERA_MOTOR_DIRECTION_PATH, e);
+        if (!RootShell.get().writeFile(CAMERA_MOTOR_DIRECTION_PATH, direction)) {
+            Log.e(TAG, "Failed to write to " + CAMERA_MOTOR_DIRECTION_PATH);
         }
     }
 
     public static void setMotorEnabled() {
-        String direction;
-        try {
-            direction = FileUtils.readTextFile(
-                    new File(CAMERA_MOTOR_DIRECTION_PATH), 1, null);
-        } catch (IOException e) {
-            direction = "0";
-        }
-        boolean movingUp = direction.trim().equals("1");
+        String direction = RootShell.get().readFile(CAMERA_MOTOR_DIRECTION_PATH);
+        boolean movingUp = direction != null && direction.trim().equals("1");
 
-        try {
-            FileUtils.stringToFile(CAMERA_MOTOR_ENABLE_PATH, "1");
-        } catch (IOException e) {
-            Log.e(TAG, "Failed to write to " + CAMERA_MOTOR_ENABLE_PATH, e);
+        if (!RootShell.get().writeFile(CAMERA_MOTOR_ENABLE_PATH, "1")) {
+            Log.e(TAG, "Failed to write to " + CAMERA_MOTOR_ENABLE_PATH);
         }
 
         triggerLed(movingUp);
@@ -97,7 +78,6 @@ public class CameraMotorController {
     /**
      * up == true  -> camera rising  (dim variant, brightness field "22")
      * up == false -> camera retracting (brighter variant, brightness field "44")
-     * Exact port of the smali color switch table.
      */
     public static void triggerLed(boolean up) {
         String enabled = SystemProperties.get(LED_ENABLE_PROP, "0");
@@ -147,12 +127,8 @@ public class CameraMotorController {
                 value = up ? "70,0,70,22,2,1" : "70,0,70,44,2,1";
                 break;
             default:
-                // Custom "r,g,b,brightness,?,?" string from settings — patch
-                // in the brightness field (index 3) and pass through as-is.
                 String[] parts = color.split(",");
                 if (parts.length < 6) {
-                    // Matches the smali fallthrough: nothing written when the
-                    // custom string is malformed and no known name matched.
                     return;
                 }
                 parts[3] = up ? "22" : "44";
@@ -164,10 +140,8 @@ public class CameraMotorController {
     }
 
     private static void writeLed(String value) {
-        try {
-            FileUtils.stringToFile(LED_COLOR_PATH, value);
-        } catch (IOException e) {
-            Log.e(TAG, "Failed to write to " + LED_COLOR_PATH, e);
+        if (!RootShell.get().writeFile(LED_COLOR_PATH, value)) {
+            Log.e(TAG, "Failed to write to " + LED_COLOR_PATH);
         }
     }
 }

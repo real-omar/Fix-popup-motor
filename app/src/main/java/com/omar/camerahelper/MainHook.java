@@ -1,6 +1,5 @@
 package com.omar.camerahelper;
 
-import android.app.ActivityThread;
 import android.content.Context;
 import android.util.Log;
 
@@ -19,7 +18,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  * standalone priv-app with its own manifest-registered Services.
  *
  * xposed_init must contain:
- *   com.omar.camerahelper.MainHook
+ *   org.lineageos.camerahelper.MainHook
  *
  * AndroidManifest.xml needs:
  *   <meta-data android:name="xposedmodule" android:value="true" />
@@ -54,10 +53,11 @@ public class MainHook implements IXposedHookLoadPackage {
 
     private void onSystemReady() {
         try {
-            Object activityThread = XposedHelpers.callStaticMethod(
-                    ActivityThread.class, "systemMain");
-            Context systemContext = (Context) XposedHelpers.callMethod(
-                    activityThread, "getSystemContext");
+            Context systemContext = HiddenApi.getSystemContext();
+            if (systemContext == null) {
+                Log.e(TAG, "Could not obtain system context, aborting init");
+                return;
+            }
 
             mCameraMotorManager = new CameraMotorManager();
             mCameraMotorManager.start(systemContext);

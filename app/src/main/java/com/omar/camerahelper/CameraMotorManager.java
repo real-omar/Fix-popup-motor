@@ -25,10 +25,15 @@ public class CameraMotorManager implements Handler.Callback {
     private long mOpenEvent;
     private long mClosedEvent;
 
+    // NOTE: the original smali overrode onCameraOpened(String, String) — a
+    // hidden @SystemApi overload not present in the public SDK, so it can't
+    // be compiled against directly. onCameraAvailable/onCameraUnavailable
+    // are the public equivalents: unavailable fires when something else
+    // grabs the camera (~open), available fires when it's freed (~closed).
     private final CameraManager.AvailabilityCallback mAvailabilityCallback =
             new CameraManager.AvailabilityCallback() {
                 @Override
-                public void onCameraClosed(String cameraId) {
+                public void onCameraAvailable(String cameraId) {
                     if (!FRONT_CAMERA_ID.equals(cameraId)) {
                         return;
                     }
@@ -38,7 +43,7 @@ public class CameraMotorManager implements Handler.Callback {
                 }
 
                 @Override
-                public void onCameraOpened(String cameraId, String packageName) {
+                public void onCameraUnavailable(String cameraId) {
                     if (!FRONT_CAMERA_ID.equals(cameraId)) {
                         return;
                     }

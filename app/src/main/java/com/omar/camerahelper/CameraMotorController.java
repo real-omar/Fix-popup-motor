@@ -1,6 +1,5 @@
 package com.omar.camerahelper;
 
-import android.os.SystemProperties;
 import android.util.Log;
 
 /**
@@ -80,12 +79,12 @@ public class CameraMotorController {
      * up == false -> camera retracting (brighter variant, brightness field "44")
      */
     public static void triggerLed(boolean up) {
-        String enabled = SystemProperties.get(LED_ENABLE_PROP, "0");
+        String enabled = HiddenApi.getSystemProperty(LED_ENABLE_PROP, "0");
         if (!"1".equals(enabled)) {
             return;
         }
 
-        String color = SystemProperties.get(LED_COLOR_PROP, "0");
+        String color = HiddenApi.getSystemProperty(LED_COLOR_PROP, "0");
         String value;
 
         switch (color) {

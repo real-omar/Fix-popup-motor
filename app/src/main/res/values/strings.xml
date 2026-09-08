@@ -1,4 +1,4 @@
 <resources>
-    <string name="app_name">VOOC Charging Info</string>
-    <string name="module_description">Adds VOOC charging detection and display for OPPO and Realme devices</string>
+    <string name="app_name">Fix Popup Camera</string>
+    <string name="module_description">fixes popup camera motor</string>
 </resources>

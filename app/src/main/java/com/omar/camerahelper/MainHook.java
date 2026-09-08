@@ -1,4 +1,4 @@
-package org.lineageos.camerahelper;
+package com.omar.camerahelper;
 
 import android.content.Context;
 import android.util.Log;

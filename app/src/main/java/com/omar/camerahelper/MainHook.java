@@ -1,4 +1,4 @@
-package com.omar.camerahelper;
+package org.lineageos.camerahelper;
 
 import android.content.Context;
 import android.util.Log;
@@ -39,16 +39,42 @@ public class MainHook implements IXposedHookLoadPackage {
             return;
         }
 
-        XposedHelpers.findAndHookMethod(
-                "com.android.server.SystemServer",
-                lpparam.classLoader,
-                "run",
-                new XC_MethodHook() {
+        // Fires as soon as the module is actually loaded into system_server,
+        // regardless of whether the later hook below ever fires. If this
+        // line never shows up in `adb logcat -s CameraHelperXposed`, the
+        // module isn't enabled/scoped onto the system framework in your
+        // LSPosed manager — check Modules -> this module -> scope includes
+        // "Android System (android)", and that it's toggled on.
+        Log.i(TAG, "Module loaded into system_server");
+
+        // NOTE: SystemServer#run() never returns — it ends in Looper.loop()
+        // which blocks until the process dies, so hooking it with
+        // afterHookedMethod would never fire. startOtherServices() is one
+        // of the last things run() calls during boot and it does return,
+        // so we hook that instead. Its signature varies by AOSP version
+        // (no-arg on older, takes a TimingsTraceAndSlog on newer), so find
+        // it by name rather than hardcoding a signature.
+        Class<?> systemServerClass = XposedHelpers.findClass(
+                "com.android.server.SystemServer", lpparam.classLoader);
+
+        boolean hooked = false;
+        for (java.lang.reflect.Method m : systemServerClass.getDeclaredMethods()) {
+            if (m.getName().equals("startOtherServices")) {
+                XposedBridge.hookMethod(m, new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) {
+                        Log.i(TAG, "startOtherServices returned, initializing");
                         onSystemReady();
                     }
                 });
+                hooked = true;
+            }
+        }
+
+        if (!hooked) {
+            Log.e(TAG, "Could not find startOtherServices to hook — "
+                    + "check logcat for the actual method name on this Android version");
+        }
     }
 
     private void onSystemReady() {

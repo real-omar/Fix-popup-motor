@@ -38,16 +38,8 @@ public class CameraMotorController {
     }
 
     public static void calibrate() {
-        String calibration = RootShell.get().readFile(CAMERA_PERSIST_HALL_CALIBRATION);
-        if (calibration == null || calibration.isEmpty()) {
-            Log.e(TAG, "Failed to read " + CAMERA_PERSIST_HALL_CALIBRATION
-                    + ", falling back to default calibration");
-            calibration = HALL_CALIBRATION_DEFAULT;
-        }
-        if (!RootShell.get().writeFile(CAMERA_MOTOR_HALL_CALIBRATION, calibration)) {
-            Log.e(TAG, "Failed to write to " + CAMERA_MOTOR_HALL_CALIBRATION);
-        }
-    }
+    return;
+}
 
     public static String getMotorPosition() {
         String position = RootShell.get().readFile(CAMERA_MOTOR_POSITION_PATH);

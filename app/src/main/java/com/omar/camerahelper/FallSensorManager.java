@@ -88,8 +88,9 @@ public class FallSensorManager implements SensorEventListener {
             return;
         }
 
-        CameraMotorController.setMotorDirection(CameraMotorController.DIRECTION_DOWN);
-        CameraMotorController.setMotorEnabled();
+        Log.d(TAG, "we are not going to do anything to see if it retracts by itself");
+       // CameraMotorController.setMotorDirection(CameraMotorController.DIRECTION_DOWN);
+       // CameraMotorController.setMotorEnabled();
 
         new Handler(Looper.getMainLooper()).post(() ->
                 Toast.makeText(mContext, "Fall detected — camera retracted", Toast.LENGTH_LONG).show());

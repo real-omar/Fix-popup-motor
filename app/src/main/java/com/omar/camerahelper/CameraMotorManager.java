@@ -65,10 +65,12 @@ public class CameraMotorManager implements Handler.Callback {
             case MSG_CAMERA_CLOSED:
                 CameraMotorController.setMotorDirection(CameraMotorController.DIRECTION_DOWN);
                 CameraMotorController.setMotorEnabled();
+                CameraMotorController.calibrate(true);
                 break;
             case MSG_CAMERA_OPEN:
                 CameraMotorController.setMotorDirection(CameraMotorController.DIRECTION_UP);
                 CameraMotorController.setMotorEnabled();
+                CameraMotorController.calibrate(false);
                 break;
             default:
                 break;

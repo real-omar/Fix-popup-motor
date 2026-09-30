@@ -37,9 +37,9 @@ public class CameraMotorController {
     private CameraMotorController() {
     }
 
-    public static void calibrate() {
-    return;
-}
+    public static void calibrate(boolean downed) {
+        CameraMotorCalibrator.calibrate(downed);
+    }
 
     public static String getMotorPosition() {
         String position = RootShell.get().readFile(CAMERA_MOTOR_POSITION_PATH);

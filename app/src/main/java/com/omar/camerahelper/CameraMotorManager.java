@@ -61,6 +61,18 @@ public class CameraMotorManager implements Handler.Callback {
 
     @Override
     public boolean handleMessage(Message msg) {
+        // One-shot, first call only: sample the motor's current at-rest
+        // position BEFORE we issue any direction/enable write below, so
+        // the calibrator reads a settled hall value, not a mid-swing one.
+        // See CameraMotorCalibrator's class doc for why that order matters.
+        // Guarded by isCalibrationDone() so every later open/close skips
+        // the extra getMotorPosition() root round-trip entirely.
+        if (!CameraMotorCalibrator.isCalibrationDone()) {
+            String currentPosition = CameraMotorController.getMotorPosition();
+            boolean motorCurrentlyDown = CameraMotorController.POSITION_DOWN.equals(currentPosition);
+            CameraMotorCalibrator.calibrateOnFirstUse(motorCurrentlyDown);
+        }
+
         switch (msg.what) {
             case MSG_CAMERA_CLOSED:
                 CameraMotorController.setMotorDirection(CameraMotorController.DIRECTION_DOWN);

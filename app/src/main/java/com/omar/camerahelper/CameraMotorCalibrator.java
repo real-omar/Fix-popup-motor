@@ -3,63 +3,57 @@ package com.omar.camerahelper;
 import android.util.Log;
 
 /**
- * Port of OppoMotorCalibrateHelper's hall-sensor calibration logic
- * (the thing OPPO's system_server calls to keep the popup motor's
- * reference points from drifting) — adapted from HIDL/IMotorControl +
- * OplusEngineerManager writes to plain sysfs + RootShell, since a GSI has
- * neither of those vendor services.
+ * Port of OppoMotorCalibrateHelper's hall-sensor calibration logic,
+ * adapted from HIDL/IMotorControl + OplusEngineerManager writes to plain
+ * sysfs + RootShell (a GSI has neither of those vendor services).
  *
- * Background, so the numbers below don't look like they fell from the sky:
- * the popup mechanism has no position encoder. It only has two hall-effect
- * sensors, and the driver exposes their raw readings as two comma-separated
- * ints at a time:
+ * Background: the popup mechanism has no position encoder, only two
+ * hall-effect sensors. The driver exposes their raw readings as two
+ * comma-separated ints:
  *   /sys/class/motor/hall_data      -> current (hall1, hall2) reading
  *   /sys/class/motor/hall_max_data  -> the extreme reading hit during the
- *                                      last full travel (i.e. "how far did
- *                                      it actually swing")
- * "Calibration" means: compare the hall reading against the last
- * known-good reference, and if it drifted outside an acceptable band,
- * recompute a new 6-value reference string and push it to
- * /sys/class/motor/hall_calibration (+ persist it so it survives reboot).
+ *                                      last full travel
+ * "Calibration" means: compare the hall reading against a known-good
+ * reference, and if it's drifted outside an acceptable band, recompute a
+ * new 6-value reference string and push it to
+ * /sys/class/motor/hall_calibration.
  *
- * WHEN THIS RUNS — read this before wiring it in anywhere:
- * The 6-value reference feeds the vendor driver's closed-loop
- * position/current control directly. If you compute it from a hall
- * reading taken while the motor is still moving (not settled at an
- * endpoint), you hand the driver a physically-wrong target, and on some
- * vendor drivers that means it keeps driving current trying to reach a
- * hall value it will never see — stalling the motor against its end-stop
- * until an over-current/thermal protection trip browns out the rail and
- * the device soft-reboots. Stock OPPO avoids this by only recalibrating
- * after a confirmed arrival interrupt, and only after several consecutive
- * bad readings (a hysteresis counter), not on a single sample. In
- * practice this means it almost never actually recalibrates during normal
- * use — the factory reference is already correct, and this exists purely
- * as a drift safety net.
- *
- * Because we can't easily hook a real "motor arrived" interrupt from an
- * LSPosed module the way system_server's native motor HAL callback does,
- * the safe choice here is: calibrate once, at boot, while the device is
- * known to be at rest (camera physically retracted, nothing driving the
- * motor) — never mid-move. Call {@link #calibrateOnBoot()} once from
- * MainHook after hooks are installed. Do NOT call {@link #calibrate}
- * after every open/close — that reintroduces the mid-swing sampling bug.
+ * STRATEGY (see calibrateOnFirstUse for the actual trigger point):
+ *  - Runs exactly once per process, on the first camera-motor event after
+ *    boot — not at system_server startup, and not on every move.
+ *  - It samples hall_data BEFORE issuing the direction/enable writes for
+ *    that first event, while the motor is still sitting wherever it
+ *    settled last boot. That's the only truly-at-rest moment we can get
+ *    without hooking a real "motor arrived" interrupt, so this is what
+ *    lets us skip arrival-polling entirely while still avoiding the
+ *    mid-swing sampling bug (see history in this file's earlier
+ *    revisions: calibrating off a reading taken while the motor is
+ *    actively moving can compute a physically-wrong reference, which on
+ *    some vendor drivers means it stalls the motor against its end-stop
+ *    trying to reach a hall value it'll never see, over-current trips,
+ *    and the device soft-reboots).
+ *  - The reference it diffs against is the compiled-in
+ *    HALL_CALIBRATION_DEFAULT, not a persisted file — no dependency on
+ *    /mnt/vendor/persist/engineermode/hall_calibration existing or being
+ *    in the format OPPO's was. This also means calibration is
+ *    intentionally NOT persisted across reboots: it's cheap to
+ *    recompute, and it avoids trusting stale data across a driver/kernel
+ *    change.
+ *  - If the at-rest reading is already within OPPO's tolerance window of
+ *    the default, nothing is written at all — matches stock's behavior
+ *    of this being a rare drift-correction, not a routine action.
  *
  * The 6-value layout mirrors CameraMotorController.HALL_CALIBRATION_DEFAULT
  * ("-200,-184,-265,23,-1,-249"):
- *   [0] = near hall-1 reference
- *   [1] = near hall-2 reference
- *   [2] = near delta reference   (used by isNeedCalib for the "down" side)
- *   [3] = far hall-1 reference
- *   [4] = far hall-2 reference
- *   [5] = far delta reference    (used by isNeedCalib for the "up" side)
+ *   [0] = near hall-1 reference   [3] = far hall-1 reference
+ *   [1] = near hall-2 reference   [4] = far hall-2 reference
+ *   [2] = near delta reference    [5] = far delta reference
  *
- * NOTE ON FIDELITY: the OPPO helper additionally branched on a project name
- * (ro.separate.soft == "19331"/"19031") and on a "backflash" device
- * variant. Those are OPPO-model-specific and meaningless on a GSI, so
- * they're dropped — this keeps the single general-purpose path (the
- * offsets/thresholds below, e.g. the ±0x28/±0x64 nudges and the 20-50 /
- * 10-60 valid-delta windows, are taken directly from that path).
+ * NOTE ON FIDELITY: OPPO's helper also branched on project name
+ * (ro.separate.soft == "19331"/"19031") and a "backflash" device variant.
+ * Those are OPPO-model-specific and meaningless on a GSI, so they're
+ * dropped — this keeps the one general-purpose path (offsets/thresholds
+ * below are taken directly from that path).
  */
 public final class CameraMotorCalibrator {
 
@@ -74,7 +68,7 @@ public final class CameraMotorCalibrator {
     private static final int FAR_DELTA = 5;
     private static final int DATA_LENGTH = 6;
 
-    // Acceptable drift window before we bother recalibrating (from OPPO's
+    // Acceptable drift window before recalibrating (OPPO's
     // sHallNearMinDif/MaxDif, sHallFarMinDif/MaxDif).
     private static final int NEAR_MIN_DIF = 20;   // 0x14
     private static final int NEAR_MAX_DIF = 50;   // 0x32
@@ -85,8 +79,7 @@ public final class CameraMotorCalibrator {
     private static final int NEAR_OFFSET = 40;    // 0x28
     private static final int FAR_OFFSET = 100;    // 0x64
 
-    // Same descending delta-standard table OPPO used for both near and far
-    // (NEAR_/FAR_CALIBRATION_DELTA_STANDARD_ARRAY were identical: 70,65,...,20).
+    // Same descending delta-standard table OPPO used for both near and far.
     private static final int[] DELTA_STANDARD_ARRAY = {
             0x46, 0x41, 0x3c, 0x37, 0x32, 0x2d, 0x28, 0x23, 0x1e, 0x19, 0x14
     };
@@ -96,54 +89,62 @@ public final class CameraMotorCalibrator {
     private static final String HALL_DATA_PATH = "/sys/class/motor/hall_data";
     private static final String HALL_MAX_DATA_PATH = "/sys/class/motor/hall_max_data";
 
-    private static volatile boolean sBootCalibrationDone = false;
+    private static volatile boolean sCalibrationDone = false;
 
     private CameraMotorCalibrator() {
     }
 
-    /**
-     * Run once from MainHook after hooks are installed, before anything
-     * moves the motor. Assumes the camera is at rest in the DOWN
-     * (retracted) position, which is the normal boot state.
-     *
-     * Idempotent and safe to call more than once — only the first call
-     * per process does anything.
-     */
-    public static synchronized void calibrateOnBoot() {
-        if (sBootCalibrationDone) {
-            return;
-        }
-        sBootCalibrationDone = true;
-
-        String position = CameraMotorController.getMotorPosition();
-        if (!CameraMotorController.POSITION_DOWN.equals(position)) {
-            Log.d(TAG, "calibrateOnBoot: motor position=" + position
-                    + " (expected DOWN/at-rest), skipping to avoid sampling mid-move");
-            return;
-        }
-
-        calibrate(true);
+    /** Cheap check so callers can skip the getMotorPosition() root round-trip once done. */
+    public static boolean isCalibrationDone() {
+        return sCalibrationDone;
     }
 
     /**
-     * Core calibration check + write. Only call this when you can
-     * guarantee the motor is stopped and settled at the endpoint matching
-     * `downed` — calling it while the motor is moving will compute a
-     * calibration reference from a bogus mid-swing hall reading, which can
-     * stall the motor against its end-stop and brown out the device. See
-     * the class doc.
+     * Call this from CameraMotorManager.handleMessage(), BEFORE issuing
+     * any direction/enable sysfs write, on every message. It's a no-op
+     * after the first call in this process's lifetime.
+     *
+     * `downed` should reflect the motor's CURRENT resting state going
+     * into this event — i.e. pass true if a MSG_CAMERA_CLOSED (down) is
+     * about to run but the motor is presently sitting UP (about to move
+     * down), false if presently sitting DOWN (about to move up). In
+     * other words: whichever endpoint it's resting AT right now, not
+     * where it's headed. CameraMotorManager works this out from
+     * getMotorPosition() before calling in.
      */
-    static void calibrate(boolean downed) {
+    public static void calibrateOnFirstUse(boolean motorCurrentlyDown) {
+        if (sCalibrationDone) {
+            return;
+        }
+        synchronized (CameraMotorCalibrator.class) {
+            if (sCalibrationDone) {
+                return;
+            }
+            sCalibrationDone = true;
+            calibrate(motorCurrentlyDown);
+        }
+    }
+
+    /**
+     * Core calibration check + write. Only ever called with the motor
+     * confirmed at rest at the endpoint matching `downed` — see the class
+     * doc for why a mid-move sample is dangerous, not just inaccurate.
+     */
+    private static void calibrate(boolean downed) {
         int[] hallData = readInts(HALL_DATA_PATH);
         if (hallData == null) {
             Log.e(TAG, "calibrate: couldn't read hall_data, skipping");
             return;
         }
 
-        int[] current = loadCalibrationData();
+        int[] reference = parseCsvInts(CameraMotorController.HALL_CALIBRATION_DEFAULT, DATA_LENGTH);
+        if (reference == null) {
+            Log.e(TAG, "calibrate: HALL_CALIBRATION_DEFAULT is malformed, skipping");
+            return;
+        }
 
-        if (!isNeedCalib(downed, hallData, current)) {
-            Log.d(TAG, "calibrate: hall reading within tolerance, no calibration needed");
+        if (!isNeedCalib(downed, hallData, reference)) {
+            Log.d(TAG, "calibrate: at-rest hall reading within tolerance, nothing to do");
             return;
         }
 
@@ -153,7 +154,7 @@ public final class CameraMotorCalibrator {
             return;
         }
 
-        int[] updated = current.clone();
+        int[] updated = reference.clone();
         if (downed) {
             updated[NEAR_HALL_ONE] = hallMaxData[0] - NEAR_OFFSET;
             updated[NEAR_HALL_TWO] = hallMaxData[1] + hallMaxData[0];
@@ -165,37 +166,39 @@ public final class CameraMotorCalibrator {
         }
 
         if (!isCalibrationDataSane(updated)) {
-            Log.e(TAG, "calibrate: computed calibration looks bogus, keeping previous data: "
-                    + join(current));
+            Log.e(TAG, "calibrate: computed calibration looks bogus, leaving hall_calibration untouched");
             return;
         }
 
-        saveCalibrationData(updated);
+        String csv = join(updated);
+        Log.d(TAG, "calibrate: writing new hall_calibration: " + csv);
+        if (!RootShell.get().writeFile(CameraMotorController.CAMERA_MOTOR_HALL_CALIBRATION, csv)) {
+            Log.e(TAG, "Failed to write " + CameraMotorController.CAMERA_MOTOR_HALL_CALIBRATION);
+        }
     }
 
     /** Mirrors OppoMotorCalibrateHelper.isNeedCalib(boolean). */
-    private static boolean isNeedCalib(boolean downed, int[] hallData, int[] calibData) {
+    private static boolean isNeedCalib(boolean downed, int[] hallData, int[] reference) {
         if (downed) {
-            int diff = -hallData[0] + calibData[NEAR_HALL_ONE];
+            int diff = -hallData[0] + reference[NEAR_HALL_ONE];
             boolean inRange = diff > NEAR_MIN_DIF && diff < NEAR_MAX_DIF;
             Log.d(TAG, "isNeedCalib(downed): hall[0]=" + hallData[0]
-                    + " ref=" + calibData[NEAR_HALL_ONE] + " diff=" + diff + " inRange=" + inRange);
+                    + " ref=" + reference[NEAR_HALL_ONE] + " diff=" + diff + " inRange=" + inRange);
             return !inRange;
         } else {
-            int diff = -hallData[1] + calibData[FAR_HALL_TWO];
+            int diff = -hallData[1] + reference[FAR_HALL_TWO];
             boolean inRange = diff > FAR_MIN_DIF && diff < FAR_MAX_DIF;
             Log.d(TAG, "isNeedCalib(up): hall[1]=" + hallData[1]
-                    + " ref=" + calibData[FAR_HALL_TWO] + " diff=" + diff + " inRange=" + inRange);
+                    + " ref=" + reference[FAR_HALL_TWO] + " diff=" + diff + " inRange=" + inRange);
             return !inRange;
         }
     }
 
     /**
-     * Loose bounds check so a read glitch can't wedge an obviously-garbage
-     * reference in. NOTE: this only catches out-of-range magnitude — it
-     * cannot detect "numerically plausible but physically wrong" values
-     * from a mid-swing sample, which is why {@link #calibrate} must only
-     * ever be called with the motor at rest.
+     * Loose magnitude bounds so an outright read glitch can't wedge a
+     * garbage reference in. Can't detect "plausible but physically wrong"
+     * values from a bad sample — that's why calibrate() must only ever
+     * run against a confirmed at-rest reading.
      */
     private static boolean isCalibrationDataSane(int[] data) {
         if (data.length != DATA_LENGTH) {
@@ -207,36 +210,6 @@ public final class CameraMotorCalibrator {
             }
         }
         return true;
-    }
-
-    /** Reads the persisted calibration, falling back to the compiled-in default. */
-    private static int[] loadCalibrationData() {
-        String persisted = RootShell.get().readFile(CameraMotorController.CAMERA_PERSIST_HALL_CALIBRATION);
-        int[] parsed = parseCsvInts(persisted, DATA_LENGTH);
-        if (parsed != null) {
-            return parsed;
-        }
-        Log.d(TAG, "loadCalibrationData: no valid persisted data, using HALL_CALIBRATION_DEFAULT");
-        int[] fallback = parseCsvInts(CameraMotorController.HALL_CALIBRATION_DEFAULT, DATA_LENGTH);
-        return fallback != null ? fallback : new int[DATA_LENGTH];
-    }
-
-    private static void saveCalibrationData(int[] data) {
-        String csv = join(data);
-        Log.d(TAG, "saveCalibrationData: " + csv);
-
-        boolean wroteSysfs = RootShell.get().writeFile(
-                CameraMotorController.CAMERA_MOTOR_HALL_CALIBRATION, csv);
-        if (!wroteSysfs) {
-            Log.e(TAG, "Failed to write " + CameraMotorController.CAMERA_MOTOR_HALL_CALIBRATION);
-        }
-
-        boolean wrotePersist = RootShell.get().writeFile(
-                CameraMotorController.CAMERA_PERSIST_HALL_CALIBRATION, csv);
-        if (!wrotePersist) {
-            Log.e(TAG, "Failed to persist calibration to "
-                    + CameraMotorController.CAMERA_PERSIST_HALL_CALIBRATION);
-        }
     }
 
     private static int[] readInts(String sysfsPath) {

@@ -38,13 +38,11 @@ public class CameraMotorController {
     }
 
     /**
-     * Kept for API compatibility with the original stub, but calibration
-     * is now driven once at boot — see CameraMotorCalibrator.calibrateOnBoot(),
-     * called from MainHook. Do not call this per-move; see
-     * CameraMotorCalibrator's class doc for why that caused the soft-reboot.
+     * Unused — calibration is now triggered from CameraMotorManager on
+     * the first real camera event, not from here. Left as a no-op stub
+     * for API compatibility; see CameraMotorCalibrator's class doc.
      */
     public static void calibrate() {
-        CameraMotorCalibrator.calibrateOnBoot();
     }
 
     public static String getMotorPosition() {

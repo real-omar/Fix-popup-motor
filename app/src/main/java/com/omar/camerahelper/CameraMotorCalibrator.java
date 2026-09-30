@@ -89,6 +89,27 @@ public final class CameraMotorCalibrator {
     private static final String HALL_DATA_PATH = "/sys/class/motor/hall_data";
     private static final String HALL_MAX_DATA_PATH = "/sys/class/motor/hall_max_data";
 
+    /**
+     * Was a safety switch while the offset formula was suspected wrong.
+     * Turns out the formula itself was fine — the earlier boot-time
+     * version raised correctly. The actual bug was a race: this version
+     * ran calibration right before the first move with no gap for the
+     * driver to ingest the new hall_calibration write before
+     * direction/enable landed on the same call stack. Fixed via
+     * CALIBRATION_SETTLE_DELAY_MS below instead of disabling writes.
+     */
+    private static final boolean DRY_RUN = false;
+
+    /**
+     * Gap between writing hall_calibration and letting the caller proceed
+     * with the actual motor move, so the driver has time to ingest the
+     * new reference before direction/enable are written. Without this,
+     * the first move after a recalibration races the write and the motor
+     * behaves as if calibrated with stale/partial state (stops early
+     * raising, overshoots lowering).
+     */
+    private static final long CALIBRATION_SETTLE_DELAY_MS = 150;
+
     private static volatile boolean sCalibrationDone = false;
 
     private CameraMotorCalibrator() {
@@ -171,9 +192,23 @@ public final class CameraMotorCalibrator {
         }
 
         String csv = join(updated);
+        if (DRY_RUN) {
+            Log.w(TAG, "calibrate: would write hall_calibration=" + csv + " but DRY_RUN is on. Not writing.");
+            return;
+        }
         Log.d(TAG, "calibrate: writing new hall_calibration: " + csv);
         if (!RootShell.get().writeFile(CameraMotorController.CAMERA_MOTOR_HALL_CALIBRATION, csv)) {
             Log.e(TAG, "Failed to write " + CameraMotorController.CAMERA_MOTOR_HALL_CALIBRATION);
+            return;
+        }
+
+        // Give the driver time to actually ingest the new reference
+        // before the caller (CameraMotorManager) issues the move that
+        // triggered this calibration in the first place.
+        try {
+            Thread.sleep(CALIBRATION_SETTLE_DELAY_MS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 

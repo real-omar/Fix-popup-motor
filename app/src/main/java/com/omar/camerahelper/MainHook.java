@@ -85,6 +85,11 @@ public class MainHook implements IXposedHookLoadPackage {
                 return;
             }
 
+            // Calibrate once, now, while the device is still at its
+            // at-rest boot state (camera retracted, motor idle) — never
+            // do this mid-move. See CameraMotorCalibrator's class doc.
+            CameraMotorCalibrator.calibrateOnBoot();
+
             mCameraMotorManager = new CameraMotorManager();
             mCameraMotorManager.start(systemContext);
 

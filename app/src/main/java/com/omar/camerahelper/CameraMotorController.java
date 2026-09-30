@@ -37,8 +37,14 @@ public class CameraMotorController {
     private CameraMotorController() {
     }
 
-    public static void calibrate(boolean downed) {
-        CameraMotorCalibrator.calibrate(downed);
+    /**
+     * Kept for API compatibility with the original stub, but calibration
+     * is now driven once at boot — see CameraMotorCalibrator.calibrateOnBoot(),
+     * called from MainHook. Do not call this per-move; see
+     * CameraMotorCalibrator's class doc for why that caused the soft-reboot.
+     */
+    public static void calibrate() {
+        CameraMotorCalibrator.calibrateOnBoot();
     }
 
     public static String getMotorPosition() {

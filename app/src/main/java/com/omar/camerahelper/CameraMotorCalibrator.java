@@ -18,20 +18,26 @@ import android.util.Log;
  * new 6-value reference string and push it to
  * /sys/class/motor/hall_calibration.
  *
- * STRATEGY (see calibrateOnFirstUse for the actual trigger point):
- *  - Runs exactly once per process, on the first camera-motor event after
- *    boot — not at system_server startup, and not on every move.
- *  - It samples hall_data BEFORE issuing the direction/enable writes for
- *    that first event, while the motor is still sitting wherever it
- *    settled last boot. That's the only truly-at-rest moment we can get
- *    without hooking a real "motor arrived" interrupt, so this is what
- *    lets us skip arrival-polling entirely while still avoiding the
- *    mid-swing sampling bug (see history in this file's earlier
- *    revisions: calibrating off a reading taken while the motor is
- *    actively moving can compute a physically-wrong reference, which on
- *    some vendor drivers means it stalls the motor against its end-stop
- *    trying to reach a hall value it'll never see, over-current trips,
- *    and the device soft-reboots).
+ * STRATEGY (see calibrateAfterMove for the actual trigger point):
+ *  - Runs exactly once per process, after the FIRST camera-motor move
+ *    fully completes — not before any move, and not on every move.
+ *  - It samples hall_data/hall_max_data AFTER that first move, not
+ *    before. This was flipped from an earlier pre-move design once
+ *    testing showed hall_max_data ("extent reached during the last
+ *    travel") reads as uninitialized 0,0 until a real travel has
+ *    actually happened — sampling it before the motor has ever moved
+ *    computes a reference from that 0,0 garbage and writes it straight
+ *    to hardware. Confirmed on-device: that produced a far-reference
+ *    write consistent exactly with hallMaxData=[0,0], and the resulting
+ *    symptom was the motor stopping almost immediately on raise and
+ *    overshooting on lower. calibrate() now also explicitly refuses to
+ *    act on a 0,0 hall_max_data reading as a second line of defense.
+ *  - Earlier still, calibrating from a reading taken mid-move (motor
+ *    actively travelling, not yet arrived) was also tried and rejected:
+ *    a physically-wrong reference from that can make some vendor
+ *    drivers stall the motor against its end-stop chasing a hall value
+ *    it'll never see, over-current trip, and soft-reboot the device.
+ *    Post-move sampling avoids both failure modes at once.
  *  - The reference it diffs against is the compiled-in
  *    HALL_CALIBRATION_DEFAULT, not a persisted file — no dependency on
  *    /mnt/vendor/persist/engineermode/hall_calibration existing or being
@@ -39,9 +45,9 @@ import android.util.Log;
  *    intentionally NOT persisted across reboots: it's cheap to
  *    recompute, and it avoids trusting stale data across a driver/kernel
  *    change.
- *  - If the at-rest reading is already within OPPO's tolerance window of
- *    the default, nothing is written at all — matches stock's behavior
- *    of this being a rare drift-correction, not a routine action.
+ *  - If the post-move hall reading is already within OPPO's tolerance
+ *    window of the default, nothing is written at all — matches stock's
+ *    behavior of this being a rare drift-correction, not routine.
  *
  * The 6-value layout mirrors CameraMotorController.HALL_CALIBRATION_DEFAULT
  * ("-200,-184,-265,23,-1,-249"):
@@ -90,25 +96,10 @@ public final class CameraMotorCalibrator {
     private static final String HALL_MAX_DATA_PATH = "/sys/class/motor/hall_max_data";
 
     /**
-     * Was a safety switch while the offset formula was suspected wrong.
-     * Turns out the formula itself was fine — the earlier boot-time
-     * version raised correctly. The actual bug was a race: this version
-     * ran calibration right before the first move with no gap for the
-     * driver to ingest the new hall_calibration write before
-     * direction/enable landed on the same call stack. Fixed via
-     * CALIBRATION_SETTLE_DELAY_MS below instead of disabling writes.
+     * Left in as a manual kill switch: set true to log the computed
+     * calibration without writing it to hardware.
      */
     private static final boolean DRY_RUN = false;
-
-    /**
-     * Gap between writing hall_calibration and letting the caller proceed
-     * with the actual motor move, so the driver has time to ingest the
-     * new reference before direction/enable are written. Without this,
-     * the first move after a recalibration races the write and the motor
-     * behaves as if calibrated with stale/partial state (stops early
-     * raising, overshoots lowering).
-     */
-    private static final long CALIBRATION_SETTLE_DELAY_MS = 150;
 
     private static volatile boolean sCalibrationDone = false;
 
@@ -121,19 +112,24 @@ public final class CameraMotorCalibrator {
     }
 
     /**
-     * Call this from CameraMotorManager.handleMessage(), BEFORE issuing
-     * any direction/enable sysfs write, on every message. It's a no-op
-     * after the first call in this process's lifetime.
+     * Call this from CameraMotorManager, AFTER a move has fully
+     * completed (motor settled at the endpoint), not before. It's a
+     * no-op after the first successful call in this process's lifetime.
      *
-     * `downed` should reflect the motor's CURRENT resting state going
-     * into this event — i.e. pass true if a MSG_CAMERA_CLOSED (down) is
-     * about to run but the motor is presently sitting UP (about to move
-     * down), false if presently sitting DOWN (about to move up). In
-     * other words: whichever endpoint it's resting AT right now, not
-     * where it's headed. CameraMotorManager works this out from
-     * getMotorPosition() before calling in.
+     * `downed` = true if the just-finished move was a lower (motor now
+     * resting DOWN), false if it was a raise (motor now resting UP).
+     *
+     * WHY POST-MOVE, NOT PRE-MOVE: hall_max_data (the "extent reached
+     * during the last travel" reading the formula needs) is only
+     * populated by the driver once a real, completed travel has
+     * happened. Sampling it before the motor has ever moved reads as
+     * 0,0 — uninitialized, not "at rest" — and computing a reference
+     * from that writes nonsense to hall_calibration (confirmed: this is
+     * exactly what produced the stuck-on-raise/overshoot-on-lower
+     * symptom, with a readback showing far-reference values that only
+     * make sense if hall_max_data had been 0,0 at write time).
      */
-    public static void calibrateOnFirstUse(boolean motorCurrentlyDown) {
+    public static void calibrateAfterMove(boolean downed) {
         if (sCalibrationDone) {
             return;
         }
@@ -141,38 +137,58 @@ public final class CameraMotorCalibrator {
             if (sCalibrationDone) {
                 return;
             }
-            sCalibrationDone = true;
-            calibrate(motorCurrentlyDown);
+            if (calibrate(downed)) {
+                sCalibrationDone = true;
+            }
         }
     }
 
     /**
      * Core calibration check + write. Only ever called with the motor
-     * confirmed at rest at the endpoint matching `downed` — see the class
-     * doc for why a mid-move sample is dangerous, not just inaccurate.
+     * confirmed to have just finished a real move — see the class doc
+     * for why this can't run before any travel has happened
+     * (hall_max_data reads as uninitialized 0,0 until then).
+     *
+     * @return true if calibration ran to a real conclusion (wrote new
+     *         data, or determined none was needed) — false if a read
+     *         failed and it should be retried on a later move instead
+     *         of being marked permanently done.
      */
-    private static void calibrate(boolean downed) {
+    private static boolean calibrate(boolean downed) {
         int[] hallData = readInts(HALL_DATA_PATH);
         if (hallData == null) {
-            Log.e(TAG, "calibrate: couldn't read hall_data, skipping");
-            return;
+            Log.e(TAG, "calibrate: couldn't read hall_data, will retry next move");
+            return false;
         }
+        Log.d(TAG, "calibrate: downed=" + downed + " hall_data=" + join(hallData));
 
         int[] reference = parseCsvInts(CameraMotorController.HALL_CALIBRATION_DEFAULT, DATA_LENGTH);
         if (reference == null) {
-            Log.e(TAG, "calibrate: HALL_CALIBRATION_DEFAULT is malformed, skipping");
-            return;
+            Log.e(TAG, "calibrate: HALL_CALIBRATION_DEFAULT is malformed, giving up");
+            return true; // won't fix itself on retry
         }
 
         if (!isNeedCalib(downed, hallData, reference)) {
             Log.d(TAG, "calibrate: at-rest hall reading within tolerance, nothing to do");
-            return;
+            return true;
         }
 
         int[] hallMaxData = readInts(HALL_MAX_DATA_PATH);
         if (hallMaxData == null) {
-            Log.e(TAG, "calibrate: needed calibration but hall_max_data unreadable, skipping");
-            return;
+            Log.e(TAG, "calibrate: needed calibration but hall_max_data unreadable, will retry next move");
+            return false;
+        }
+        Log.d(TAG, "calibrate: hall_max_data=" + join(hallMaxData));
+
+        if (hallMaxData[0] == 0 && hallMaxData[1] == 0) {
+            // This is the exact condition that produced the
+            // stuck-on-raise/overshoot-on-lower bug: hall_max_data isn't
+            // populated yet even though we thought a move had completed.
+            // Refuse to calibrate off it and retry on the next move
+            // instead of writing garbage again.
+            Log.w(TAG, "calibrate: hall_max_data is 0,0 (uninitialized) despite calling "
+                    + "this post-move — will retry on next move instead of writing garbage");
+            return false;
         }
 
         int[] updated = reference.clone();
@@ -188,28 +204,31 @@ public final class CameraMotorCalibrator {
 
         if (!isCalibrationDataSane(updated)) {
             Log.e(TAG, "calibrate: computed calibration looks bogus, leaving hall_calibration untouched");
-            return;
+            return true; // computed math won't change on retry, don't loop forever
         }
 
         String csv = join(updated);
         if (DRY_RUN) {
             Log.w(TAG, "calibrate: would write hall_calibration=" + csv + " but DRY_RUN is on. Not writing.");
-            return;
+            return true;
         }
         Log.d(TAG, "calibrate: writing new hall_calibration: " + csv);
         if (!RootShell.get().writeFile(CameraMotorController.CAMERA_MOTOR_HALL_CALIBRATION, csv)) {
             Log.e(TAG, "Failed to write " + CameraMotorController.CAMERA_MOTOR_HALL_CALIBRATION);
-            return;
+            return false;
         }
 
-        // Give the driver time to actually ingest the new reference
-        // before the caller (CameraMotorManager) issues the move that
-        // triggered this calibration in the first place.
-        try {
-            Thread.sleep(CALIBRATION_SETTLE_DELAY_MS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+        // Confirm the driver actually accepted what we sent rather than
+        // silently clamping/rejecting it.
+        String readback = RootShell.get().readFile(CameraMotorController.CAMERA_MOTOR_HALL_CALIBRATION);
+        if (!csv.equals(readback == null ? null : readback.trim())) {
+            Log.w(TAG, "calibrate: readback mismatch — wrote \"" + csv
+                    + "\" but driver now reports \"" + readback
+                    + "\". Driver is not applying what we wrote as-is.");
+        } else {
+            Log.d(TAG, "calibrate: readback confirms write applied");
         }
+        return true;
     }
 
     /** Mirrors OppoMotorCalibrateHelper.isNeedCalib(boolean). */

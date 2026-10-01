@@ -37,13 +37,9 @@ public class CameraMotorController {
     private CameraMotorController() {
     }
 
-    /**
-     * Unused — calibration is now triggered from CameraMotorManager on
-     * the first real camera event, not from here. Left as a no-op stub
-     * for API compatibility; see CameraMotorCalibrator's class doc.
-     */
     public static void calibrate() {
-    }
+    return;
+}
 
     public static String getMotorPosition() {
         String position = RootShell.get().readFile(CAMERA_MOTOR_POSITION_PATH);

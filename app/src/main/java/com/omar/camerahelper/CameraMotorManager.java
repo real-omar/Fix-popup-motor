@@ -20,14 +20,6 @@ public class CameraMotorManager implements Handler.Callback {
     private static final int CAMERA_EVENT_DELAY_TIME = 100;
     private static final int MSG_CAMERA_CLOSED = 1000;
     private static final int MSG_CAMERA_OPEN = 1001;
-    private static final int MSG_CALIBRATE_AFTER_MOVE = 1002;
-
-    // How long to wait after enabling the motor before treating it as
-    // "arrived" for calibration purposes. We have no real arrival
-    // interrupt to hook from an LSPosed module, so this is a timed
-    // guess — long enough that a full popup travel has definitely
-    // finished. Adjust if your device's travel is slower/faster.
-    private static final long MOTOR_TRAVEL_SETTLE_TIME_MS = 700;
 
     private final Handler mHandler = new Handler(this);
     private long mOpenEvent;
@@ -73,34 +65,14 @@ public class CameraMotorManager implements Handler.Callback {
             case MSG_CAMERA_CLOSED:
                 CameraMotorController.setMotorDirection(CameraMotorController.DIRECTION_DOWN);
                 CameraMotorController.setMotorEnabled();
-                scheduleCalibrationIfNeeded(true);
                 break;
             case MSG_CAMERA_OPEN:
                 CameraMotorController.setMotorDirection(CameraMotorController.DIRECTION_UP);
                 CameraMotorController.setMotorEnabled();
-                scheduleCalibrationIfNeeded(false);
-                break;
-            case MSG_CALIBRATE_AFTER_MOVE:
-                CameraMotorCalibrator.calibrateAfterMove(msg.arg1 == 1);
                 break;
             default:
                 break;
         }
         return true;
-    }
-
-    /**
-     * Fires once, MOTOR_TRAVEL_SETTLE_TIME_MS after the first real move
-     * this process has made — by then the motor should have actually
-     * arrived, so hall_max_data reflects a genuine completed travel
-     * instead of the uninitialized 0,0 it reads as before any move has
-     * ever happened. See CameraMotorCalibrator's class doc.
-     */
-    private void scheduleCalibrationIfNeeded(boolean downed) {
-        if (CameraMotorCalibrator.isCalibrationDone()) {
-            return;
-        }
-        Message calibrateMsg = mHandler.obtainMessage(MSG_CALIBRATE_AFTER_MOVE, downed ? 1 : 0, 0);
-        mHandler.sendMessageDelayed(calibrateMsg, MOTOR_TRAVEL_SETTLE_TIME_MS);
     }
 }
